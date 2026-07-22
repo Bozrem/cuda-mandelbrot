@@ -8,6 +8,11 @@ inline constexpr uint16_t HEIGHT = 2160;
 inline constexpr float CENTER_X = -0.77468f;
 inline constexpr float CENTER_Y = -0.13741f;
 
+// Animation
+inline constexpr uint16_t FPS = 60;
+inline constexpr float DURATION_SEC = 1.0f;
+inline constexpr float MAGNIFICATION_PER_SEC = 2.0f; // zoom multiplier each second
+
 // Escape alg
 inline constexpr uint16_t ESCAPE_THRES2 = 128 * 128; // Threshold is 128, but we need it squared in the alg
 

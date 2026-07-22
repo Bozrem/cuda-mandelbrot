@@ -1,7 +1,7 @@
 #include "frame_generation.h"
 #include "cuda_util.h"
 
-__device__ __forceinline__ float get_smoothed_iter(float cx, float cy, float max_iterations) {
+__device__ __forceinline__ float get_smoothed_iter(float cx, float cy, int max_iterations) {
     float zx = 0.0f;
     float zy = 0.0f;
     float zx2 = 0.0f;
@@ -70,7 +70,7 @@ __device__ __forceinline__ void accumulate_sample(
 }
 
 
-static __global__ void mandelbrot_frame(p010_frame_t* p010, float zoom, float max_iterations) {
+static __global__ void mandelbrot_frame(p010_frame_t* p010, float zoom, int max_iterations) {
     uint16_t x = (blockIdx.x * blockDim.x) + threadIdx.x;
     uint16_t y = (blockIdx.y * blockDim.y) + threadIdx.y;
 
@@ -137,7 +137,7 @@ static __global__ void mandelbrot_frame(p010_frame_t* p010, float zoom, float ma
     float V =  0.5000f * r_pq - 0.4598f * g_pq - 0.0402f * b_pq;
 
     // Scale to clamped 10 bit range
-    float y_scaled = fmaxf(256.0f, fminf(940.0f, 256.0f + Y * 684.0f));
+    float y_scaled = fmaxf(64.0f, fminf(940.0f, 64.0f + Y * 876.0f));
     float u_scaled = fmaxf(64.0f,  fminf(960.0f, 512.0f + U * 896.0f));
     float v_scaled = fmaxf(64.0f,  fminf(960.0f, 512.0f + V * 896.0f));
 
@@ -156,7 +156,7 @@ static __global__ void mandelbrot_frame(p010_frame_t* p010, float zoom, float ma
     }
 }
 
-void generate_fused(p010_frame_t* d_p010, float zoom, float max_iterations) {
+void generate_fused(p010_frame_t* d_p010, float zoom, int max_iterations) {
     dim3 block_dim(16, 16);
     dim3 grid_dim(
         (WIDTH + block_dim.x - 1) / block_dim.x,
@@ -167,7 +167,7 @@ void generate_fused(p010_frame_t* d_p010, float zoom, float max_iterations) {
     CUDA_CHECK(cudaGetLastError());
 }
 
-void render_fused_frame_host(p010_frame_t* h_p010, float zoom, float max_iterations) {
+void render_fused_frame_host(p010_frame_t* h_p010, float zoom, int max_iterations) {
     p010_frame_t* d_p010 = nullptr;
 
     CUDA_CHECK(cudaMalloc((void **)&d_p010, sizeof(p010_frame_t)));
