@@ -1,9 +1,10 @@
 #include "pgm.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 
-void save_as_pgm(const char* path, const frame_t frame) {
+void save_as_pgm_linear(const char* path, const frame_t frame, float value_range) {
     FILE* out = std::fopen(path, "wb");
     if (out == nullptr) {
         std::fprintf(stderr, "Failed to open %s for writing\n", path);
@@ -14,9 +15,12 @@ void save_as_pgm(const char* path, const frame_t frame) {
 
     for (uint16_t y = 0; y < HEIGHT; y++) {
         for (uint16_t x = 0; x < WIDTH; x++) {
-            unsigned char pixel = (frame[y][x] == -1.0f) ?
-                                  0 :
-                                  (int)(frame[y][x] * PGM_BAND_DENSITY) % 256;
+            unsigned char pixel = 0;
+            if (frame[y][x] != -1.0f) {
+                float t = frame[y][x] / value_range;
+                t = std::clamp(t, 0.0f, 1.0f);
+                pixel = (unsigned char)(t * 255.0f);
+            }
             std::fputc(pixel, out);
         }
     }

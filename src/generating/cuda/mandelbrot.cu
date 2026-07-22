@@ -46,7 +46,7 @@ static __global__ void mandelbrot_frame(float* p, float zoom, float max_iteratio
     *p = (i == max_iterations) ? -1.0f : nu; // this should be a sel operation that doesn't diverge the warp
 }
 
-void render_escape_frame(frame_t h_frame, float zoom) {
+void render_escape_frame(frame_t h_frame, float zoom, float max_iterations) {
     float* d_frame = nullptr;
 
     check_cuda(
@@ -63,7 +63,7 @@ void render_escape_frame(frame_t h_frame, float zoom) {
         (HEIGHT + block_dim.y - 1) / block_dim.y
     );
 
-    mandelbrot_frame<<<grid_dim, block_dim>>>(d_frame, zoom);
+    mandelbrot_frame<<<grid_dim, block_dim>>>(d_frame, zoom, max_iterations);
     check_cuda(cudaGetLastError(), "mandelbrot_frame launch");
     check_cuda(cudaDeviceSynchronize(), "mandelbrot_frame sync");
 

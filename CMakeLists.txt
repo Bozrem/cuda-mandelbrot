@@ -9,7 +9,8 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 add_executable(mandelbrot
     src/main.cpp
     src/generating/cuda/mandelbrot.cu
-    src/rendering/pgm/pgm.cpp
+    src/rendering/pgm/pgm_modulo.cpp
+    src/rendering/pgm/pgm_linear.cpp
 )
 
 target_include_directories(mandelbrot PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
