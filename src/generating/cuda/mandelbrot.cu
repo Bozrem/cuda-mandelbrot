@@ -11,7 +11,7 @@ static void check_cuda(cudaError_t err, const char* what) {
     std::exit(EXIT_FAILURE);
 }
 
-static __global__ void mandelbrot_frame(float* p, float zoom) {
+static __global__ void mandelbrot_frame(float* p, float zoom, float max_iterations) {
     uint16_t x = (blockIdx.x * blockDim.x) + threadIdx.x;
     uint16_t y = (blockIdx.y * blockDim.y) + threadIdx.y;
 
@@ -34,14 +34,16 @@ static __global__ void mandelbrot_frame(float* p, float zoom) {
     int i = 0;
 
     // Optimized Escape Time Algorithm
-    for (; i < MAX_ITERATIONS && zx2 + zy2 <= 4; i++) {
+    for (; i < max_iterations && zx2 + zy2 <= ESCAPE_THRES2; i++) {
         zy = 2 * zx * zy + cy;
         zx = zx2 - zy2 + cx;
         zx2 = zx * zx;
         zy2 = zy * zy;
     }
 
-    *p = (float)i;
+    // Continuous Iteration (smoothing)
+    float nu = (float)i + 1.0f - __log2f(0.5f * __log2f(zx2 + zy2));
+    *p = (i == max_iterations) ? -1.0f : nu; // this should be a sel operation that doesn't diverge the warp
 }
 
 void render_escape_frame(frame_t h_frame, float zoom) {

@@ -14,14 +14,9 @@ void save_as_pgm(const char* path, const frame_t frame) {
 
     for (uint16_t y = 0; y < HEIGHT; y++) {
         for (uint16_t x = 0; x < WIDTH; x++) {
-            float t = frame[y][x] / static_cast<float>(MAX_ITERATIONS);
-            if (t < 0.0f) {
-                t = 0.0f;
-            }
-            if (t > 1.0f) {
-                t = 1.0f;
-            }
-            unsigned char pixel = static_cast<unsigned char>(t * 255.0f);
+            unsigned char pixel = (frame[y][x] == -1.0f) ?
+                                  0 :
+                                  (int)(frame[y][x] * PGM_BAND_DENSITY) % 256;
             std::fputc(pixel, out);
         }
     }
