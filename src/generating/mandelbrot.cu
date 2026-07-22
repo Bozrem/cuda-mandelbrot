@@ -1,15 +1,5 @@
-#include "mandelbrot.h"
-
-#include <cstdio>
-#include <cstdlib>
-
-static void check_cuda(cudaError_t err, const char* what) {
-    if (err == cudaSuccess) {
-        return;
-    }
-    std::fprintf(stderr, "CUDA error (%s): %s\n", what, cudaGetErrorString(err));
-    std::exit(EXIT_FAILURE);
-}
+#include "generating/generating.h"
+#include "cuda_util.h"
 
 static __global__ void mandelbrot_frame(float* p, float zoom, float max_iterations) {
     uint16_t x = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -46,36 +36,30 @@ static __global__ void mandelbrot_frame(float* p, float zoom, float max_iteratio
     *p = (i == max_iterations) ? -1.0f : nu; // this should be a sel operation that doesn't diverge the warp
 }
 
-void render_escape_frame(frame_t h_frame, float zoom, float max_iterations) {
-    float* d_frame = nullptr;
-
-    check_cuda(
-        cudaMalloc(
-            (void **)&d_frame,
-            PIXEL_COUNT * sizeof(float)
-        ),
-        "cudaMalloc"
-    );
-
+void generate_escape(float* d_iter, float zoom, float max_iterations) {
     dim3 block_dim(16, 16);
     dim3 grid_dim(
         (WIDTH + block_dim.x - 1) / block_dim.x,
         (HEIGHT + block_dim.y - 1) / block_dim.y
     );
 
-    mandelbrot_frame<<<grid_dim, block_dim>>>(d_frame, zoom, max_iterations);
-    check_cuda(cudaGetLastError(), "mandelbrot_frame launch");
-    check_cuda(cudaDeviceSynchronize(), "mandelbrot_frame sync");
+    mandelbrot_frame<<<grid_dim, block_dim>>>(d_iter, zoom, max_iterations);
+    CUDA_CHECK(cudaGetLastError());
+}
 
-    check_cuda(
-        cudaMemcpy(
-            h_frame,
-            d_frame,
-            PIXEL_COUNT * sizeof(float),
-            cudaMemcpyDeviceToHost
-        ),
-        "cudaMemcpy DtoH"
-    );
+void render_escape_frame_host(iter_frame_t h_iter, float zoom, float max_iterations) {
+    float* d_iter = nullptr;
 
-    check_cuda(cudaFree(d_frame), "cudaFree");
+    CUDA_CHECK(cudaMalloc((void **)&d_iter, PIXEL_COUNT * sizeof(float)));
+
+    generate_escape(d_iter, zoom, max_iterations);
+
+    CUDA_CHECK(cudaMemcpy(
+        h_iter,
+        d_iter,
+        PIXEL_COUNT * sizeof(float),
+        cudaMemcpyDeviceToHost
+    ));
+
+    CUDA_CHECK(cudaFree(d_iter));
 }

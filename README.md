@@ -7,22 +7,25 @@ Generates high quality videos of the Mandelbrot set using CUDA.
 ```bash
 cmake -S . -B build
 cmake --build build
-./build/mandelbrot
+./build/mandelbrot         # host pipeline (PGM stills)
+./build/mandelbrot_device  # device-resident pipeline
 ```
 
-Writes `mandelbrot.pgm` in the working directory.
-
-## Layout (Major I / Option A)
+## Layout
 
 ```text
 src/
-  main.cpp           # constexprs + orchestration
-  frame.hpp          # FrameParams, EscapeFrame
-  cuda/
-    mandelbrot.h     # host-callable wrapper
-    mandelbrot.cu    # kernel + wrapper impl
-  io/
-    pgm.h / pgm.cpp  # still-image sink
+  main.cpp                 # host orchestration + PGM sinks
+  main_device.cpp          # device-resident orchestration
+  config.hpp               # iter_frame_t, p010_frame_t, constants
+  generating/
+    generating.h           # escape populator + host convenience
+    mandelbrot.cu
+  coloring/
+    coloring.h             # iter → P010 populator
+    coloring.cu
+  smoothing/
+    smoothing.h            # in-place P010 smoother
+    smoothing.cu
+  rendering/pgm/           # still-image sinks
 ```
-
-See `stages.md` for the longer roadmap.

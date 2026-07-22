@@ -3,7 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-void save_as_pgm_modulo(const char* path, const frame_t frame, float band_density) {
+void save_as_pgm_modulo(const char* path, const iter_frame_t frame, float band_density) {
     FILE* out = std::fopen(path, "wb");
     if (out == nullptr) {
         std::fprintf(stderr, "Failed to open %s for writing\n", path);
