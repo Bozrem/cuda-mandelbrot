@@ -1,23 +1,35 @@
-#include "generating/generating.h"
-#include "rendering/pgm/pgm.h"
+#include "frame_generation.h"
+#include "cuda_util.h"
 
-#include <cmath>
+#include <cstdio>
+
+// Device pipeline dump: fused generate → write raw P010 for ffmpeg preview.
 
 int main() {
-    // static: ~33MB frame lives in data segment, not on the stack
-    static iter_frame_t frame;
     float zoom = 10000.0f;
-    int max_iterations = 100;
+    float max_iterations = 100.0f;
 
-    // Continuous iteration: nu = i + 1 - log2(0.5 * log2(|z|^2)).
-    // Escaped points stop with i <= max_iterations - 1 and |z| just above the
-    // escape radius, so nu is bounded above by:
-    //   max_iterations - log2(0.5 * log2(ESCAPE_THRES2))
-    float continuous_range =
-        (float)max_iterations - std::log2(0.5f * std::log2((float)ESCAPE_THRES2));
+    p010_frame_t* d_p010 = nullptr;
+    CUDA_CHECK(cudaMalloc((void **)&d_p010, sizeof(p010_frame_t)));
 
-    render_escape_frame_host(frame, zoom, max_iterations);
-    save_as_pgm_modulo("mandelbrot_modulo.pgm", frame, 5.0f);
-    save_as_pgm_linear("mandelbrot_linear.pgm", frame, continuous_range);
+    generate_fused(d_p010, zoom, max_iterations);
+
+    static p010_frame_t h_p010;
+    CUDA_CHECK(cudaMemcpy(&h_p010, d_p010, sizeof(p010_frame_t),
+                          cudaMemcpyDeviceToHost));
+
+    FILE* f = std::fopen("frame.p010", "wb");
+    if (!f) {
+        std::perror("fopen frame.p010");
+        std::exit(EXIT_FAILURE);
+    }
+    if (std::fwrite(&h_p010, 1, sizeof(h_p010), f) != sizeof(h_p010)) {
+        std::fprintf(stderr, "fwrite failed for frame.p010\n");
+        std::exit(EXIT_FAILURE);
+    }
+    std::fclose(f);
+    std::printf("Wrote frame.p010 (%zu bytes)\n", sizeof(h_p010));
+
+    CUDA_CHECK(cudaFree(d_p010));
     return 0;
 }
