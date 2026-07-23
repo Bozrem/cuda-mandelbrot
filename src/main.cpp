@@ -47,7 +47,7 @@ int main() {
 
             double zoom = ZOOM_START;
             for (uint32_t frame = 0; frame < TOTAL_FRAMES; frame++) {
-                int max_iterations = static_cast<int>(50.0 + 20.0 * std::log2(zoom));
+                int max_iterations = static_cast<int>(100.0 + 12.0 * std::log2(zoom));
 
                 // Linear pipeline for now: generate, then encode, one frame at a time.
                 // No overlap between GPU render and NVENC submission yet — slow but simple.
