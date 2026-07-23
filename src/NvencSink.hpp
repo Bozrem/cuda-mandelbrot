@@ -1,10 +1,10 @@
 #pragma once
 
 #include "NvEncoderCuda.h"
+#include "MatroskaMuxSink.hpp"
 #include "config.hpp"
 #include "cuda_util.h"
 
-#include <fstream>
 #include <vector>
 #include <memory>
 #include <stdexcept>
@@ -12,7 +12,7 @@
 class NvencSink {
 private:
     std::unique_ptr<NvEncoderCuda> encoder;
-    std::ofstream output_file;
+    std::unique_ptr<MatroskaMuxSink> mux_;
 
     // HDR10 static metadata (SDK 13.1.15 first-class structs). Built once in the ctor;
     // pointers must stay valid across EncodeFrame because lookahead can defer the encode.
@@ -22,10 +22,7 @@ private:
 
 public:
     NvencSink(CUcontext cu_ctx, const char* out_path) {
-        output_file.open(out_path, std::ios::binary);
-        if (!output_file) {
-            throw std::runtime_error("Failed to open bitstream output file");
-        }
+        mux_ = std::make_unique<MatroskaMuxSink>(out_path, WIDTH, HEIGHT, FPS);
 
         encoder = std::make_unique<NvEncoderCuda>(
             cu_ctx, WIDTH, HEIGHT, NV_ENC_BUFFER_FORMAT_YUV420_10BIT
@@ -62,6 +59,9 @@ public:
         enc_config.rcParams.enableLookahead = 1;
         enc_config.rcParams.lookaheadDepth = 20; // Range is 0-(31 - #B frames); 20 is fine for offline
 
+        // No B-frames: pts == dts == monotonic AU index for the muxer.
+        enc_config.frameIntervalP = 1;
+
         // Profile lives on NV_ENC_CONFIG, not hevcConfig (SDK 13.x layout change).
         enc_config.profileGUID = NV_ENC_HEVC_PROFILE_MAIN10_GUID;
 
@@ -90,6 +90,10 @@ public:
 
         // Lock in the configuration and allocate hardware surfaces
         encoder->CreateEncoder(&init_params);
+
+        std::vector<uint8_t> seq;
+        encoder->GetSequenceParams(seq);
+        mux_->set_extradata(seq.data(), seq.size());
     }
 
     void queue_frame(const p010_frame_t* d_p010) {
@@ -129,8 +133,10 @@ public:
             encoder->EndEncode(packets); // Flushes out remaining frames
             write_packets(packets);
             encoder->DestroyEncoder();
+            encoder.reset();
         }
-        if (output_file.is_open()) output_file.close();
+        // Trailer after all AUs are written.
+        mux_.reset();
     }
 
 private:
@@ -149,9 +155,18 @@ private:
         content_light_level_.maxPicAverageLightLevel = 400; // MaxFALL (estimate)
     }
 
+    static bool is_keyframe(const NvEncOutputFrame& packet) {
+        return packet.pictureType == NV_ENC_PIC_TYPE_IDR
+            || packet.pictureType == NV_ENC_PIC_TYPE_I;
+    }
+
     void write_packets(const std::vector<NvEncOutputFrame>& packets) {
         for (const auto& packet : packets) {
-            output_file.write(reinterpret_cast<const char*>(packet.frame.data()), packet.frame.size());
+            mux_->write_au(
+                packet.frame.data(),
+                packet.frame.size(),
+                is_keyframe(packet)
+            );
         }
     }
 };

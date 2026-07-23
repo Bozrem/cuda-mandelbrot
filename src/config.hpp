@@ -5,16 +5,23 @@
 // General
 inline constexpr uint16_t WIDTH = 3840;
 inline constexpr uint16_t HEIGHT = 2160;
-inline constexpr float CENTER_X = -0.77468f;
-inline constexpr float CENTER_Y = -0.13741f;
+inline constexpr int BLOCK_DIM = 16; // kernel block; warp 2x2 chroma shuffle assumes this == 16
+inline constexpr double CENTER_X = -0.7746806106269039;
+inline constexpr double CENTER_Y = 0.1374168856037867;
+
+// Exact grid coverage (no per-thread OOB guard) + 4:2:0 + 16-wide warp pairing
+static_assert(WIDTH % BLOCK_DIM == 0, "WIDTH must be divisible by BLOCK_DIM");
+static_assert(HEIGHT % BLOCK_DIM == 0, "HEIGHT must be divisible by BLOCK_DIM");
+static_assert(WIDTH % 2 == 0 && HEIGHT % 2 == 0, "4:2:0 requires even WIDTH and HEIGHT");
+static_assert(BLOCK_DIM == 16, "chroma shuffle uses lane xor 16; requires 16-wide blocks");
 
 // Animation
-inline constexpr uint16_t FPS = 60;
-inline constexpr float DURATION_SEC = 10.0f;
+inline constexpr uint16_t FPS = 5;
+inline constexpr float DURATION_SEC = 44.0f;
 inline constexpr float MAGNIFICATION_PER_SEC = 2.0f; // zoom multiplier each second
 
-// Escape alg
-inline constexpr uint16_t ESCAPE_THRES2 = 128 * 128; // Threshold is 128, but we need it squared in the alg
+// Escape alg (bailout radius 128, stored squared for the |z|^2 compare)
+inline constexpr double ESCAPE_THRES2 = 128.0 * 128.0;
 
 inline constexpr uint32_t PIXEL_COUNT = WIDTH * HEIGHT;
 

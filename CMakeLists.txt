@@ -28,7 +28,7 @@ target_include_directories(mandelbrot PRIVATE
 )
 
 find_package(CUDAToolkit REQUIRED)
-
+find_package(PkgConfig REQUIRED)
 # libnvidia-encode.so ships with the NVIDIA driver, not the CUDA toolkit, so it
 # isn't covered by CUDAToolkit's imported targets — find it explicitly. It's
 # usually alongside libcuda.so (stubs live under the toolkit's lib64/stubs too).
@@ -40,12 +40,19 @@ if(NOT NVIDIA_ENCODE_LIB)
     message(FATAL_ERROR "libnvidia-encode not found — is the NVIDIA driver installed on this machine?")
 endif()
 
+pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET 
+    libavformat 
+    libavcodec 
+    libavutil
+)
+
 find_package(Threads REQUIRED)
 
 target_link_libraries(mandelbrot PRIVATE
     ${NVIDIA_ENCODE_LIB}
     CUDA::cuda_driver
     Threads::Threads
+    PkgConfig::FFMPEG
 )
 
 # Adjust if your test machine targets a different arch

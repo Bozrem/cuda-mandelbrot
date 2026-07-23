@@ -22,10 +22,10 @@
 
 
 int main() {
-    constexpr float ZOOM_START = 500.0f;
+    constexpr double ZOOM_START = 500.0;
     const uint32_t TOTAL_FRAMES = static_cast<uint32_t>(FPS * DURATION_SEC);
     // Per-frame zoom multiplier so MAGNIFICATION_PER_SEC holds over one second.
-    const float zoom_per_frame = std::pow(MAGNIFICATION_PER_SEC, 1.0f / FPS);
+    const double zoom_per_frame = std::pow(static_cast<double>(MAGNIFICATION_PER_SEC), 1.0 / FPS);
 
     // NVENC needs a CUDA *driver* API context. Creating it explicitly (rather than
     // letting the CUDA runtime lazily create its own primary context on first use)
@@ -43,12 +43,11 @@ int main() {
     try {
         // Scoped so ~NvencSink() (flush + close) runs before we tear down the CUDA context below.
         {
-            NvencSink sink(cu_context, "output_hdr.hevc");
+            NvencSink sink(cu_context, "output_hdr.mkv");
 
-            float zoom = ZOOM_START;
+            double zoom = ZOOM_START;
             for (uint32_t frame = 0; frame < TOTAL_FRAMES; frame++) {
-                // MVP iteration schedule — tune A/B as you go deeper.
-                int max_iterations = static_cast<int>(50.0f + 20.0f * std::log2(zoom));
+                int max_iterations = static_cast<int>(50.0 + 20.0 * std::log2(zoom));
 
                 // Linear pipeline for now: generate, then encode, one frame at a time.
                 // No overlap between GPU render and NVENC submission yet — slow but simple.
@@ -64,9 +63,9 @@ int main() {
                 std::fflush(stderr);
             }
             std::fprintf(stderr, "\n");
-        } // ~NvencSink() flushes remaining frames and closes the bitstream file here
+        } // ~NvencSink() flushes remaining frames and finishes the Matroska mux here
 
-        std::printf("Wrote output_hdr.hevc (%u frames @ %u fps)\n", TOTAL_FRAMES, FPS);
+        std::printf("Wrote output_hdr.mkv (%u frames @ %u fps)\n", TOTAL_FRAMES, FPS);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "Encode failed: %s\n", e.what());
         CUDA_CHECK(cudaFree(d_p010));

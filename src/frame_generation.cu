@@ -1,32 +1,39 @@
 #include "frame_generation.h"
 #include "cuda_util.h"
 
-__device__ __forceinline__ float get_smoothed_iter(float cx, float cy, int max_iterations) {
-    float zx = 0.0f;
-    float zy = 0.0f;
-    float zx2 = 0.0f;
-    float zy2 = 0.0f;
+__device__ __forceinline__ float3& operator+=(float3& a, float3 b) {
+    a.x += b.x;
+    a.y += b.y;
+    a.z += b.z;
+    return a;
+}
+
+__device__ __forceinline__ float get_smoothed_iter(double cx, double cy, int max_iterations) {
+    double zx = 0.0;
+    double zy = 0.0;
+    double zx2 = 0.0;
+    double zy2 = 0.0;
 
     int i = 0;
 
-    // Optimized Escape Time Algorithm
+    // Optimized Escape Time Algorithm (FP64 — depth past ~1e7–1e8 zoom)
     for (; i < max_iterations && zx2 + zy2 <= ESCAPE_THRES2; i++) {
-        zy = 2 * zx * zy + cy;
+        zy = 2.0 * zx * zy + cy;
         zx = zx2 - zy2 + cx;
         zx2 = zx * zx;
         zy2 = zy * zy;
     }
 
-    // Continuous Iteration (smoothing)
-    float nu = (float)i + 1.0f - __log2f(0.5f * __log2f(zx2 + zy2));
-    return (i == max_iterations) ? -1.0f : nu; // this should be a sel operation that doesn't diverge the warp
+    // Continuous iteration (smoothing); log2 is the double-precision math API
+    const float nu = static_cast<float>(i) + 1.0f
+                   - static_cast<float>(log2(0.5 * log2(zx2 + zy2)));
+    return (i == max_iterations) ? -1.0f : nu;
 }
 
 
 // SMPTE ST 2084 (PQ Curve) transfer function
 __device__ __forceinline__ float apply_pq(float color_channel) {
-    // 1. Scale 0.0-1.0 to nits (Assuming 1.0 = 1000 nits. Max PQ is 10000 nits, so 1000/10000 = 0.1f)
-    float L = color_channel * 0.1f;
+    float L = color_channel * 0.07f;
     
     // 2. PQ Constants
     const float m1 = 0.15930175f;
@@ -43,143 +50,87 @@ __device__ __forceinline__ float apply_pq(float color_channel) {
     return __powf(num / den, m2);
 }
 
-// Palette + live accumulate. Optionally track R range for the chaos heuristic.
-__device__ __forceinline__ void accumulate_sample(
-    float nu,
-    float& sum_r, float& sum_g, float& sum_b,
-    float* min_r, float* max_r
-) {
-    float r, g, b;
-    if (nu == -1.0f) {
-        r = g = b = 0.0f;
-    } else {
-        float t = nu / PALETTE_CYCLE_LENGTH;
-        r = ACTIVE_PALETTE.ax + ACTIVE_PALETTE.bx * __cosf(6.28318f * (ACTIVE_PALETTE.cx * t + ACTIVE_PALETTE.dx));
-        g = ACTIVE_PALETTE.ay + ACTIVE_PALETTE.by * __cosf(6.28318f * (ACTIVE_PALETTE.cy * t + ACTIVE_PALETTE.dy));
-        b = ACTIVE_PALETTE.az + ACTIVE_PALETTE.bz * __cosf(6.28318f * (ACTIVE_PALETTE.cz * t + ACTIVE_PALETTE.dz));
+__device__ __forceinline__ float3 apply_palette(float nu) {
+    if (nu < 0.0f) {
+        return make_float3(0.0f, 0.0f, 0.0f);
     }
 
-    sum_r += r;
-    sum_g += g;
-    sum_b += b;
-
-    if (min_r != nullptr) {
-        *min_r = fminf(*min_r, r);
-        *max_r = fmaxf(*max_r, r);
-    }
+    float t = nu / PALETTE_CYCLE_LENGTH;
+    return make_float3(
+        ACTIVE_PALETTE.ax + ACTIVE_PALETTE.bx * __cosf(6.28318f * (ACTIVE_PALETTE.cx * t + ACTIVE_PALETTE.dx)),
+        ACTIVE_PALETTE.ay + ACTIVE_PALETTE.by * __cosf(6.28318f * (ACTIVE_PALETTE.cy * t + ACTIVE_PALETTE.dy)),
+        ACTIVE_PALETTE.az + ACTIVE_PALETTE.bz * __cosf(6.28318f * (ACTIVE_PALETTE.cz * t + ACTIVE_PALETTE.dz))
+    );
 }
 
+static __global__ void mandelbrot_frame(p010_frame_t* p010, double zoom, int max_iterations) {
+    const uint16_t x = (blockIdx.x * blockDim.x) + threadIdx.x;
+    const uint16_t y = (blockIdx.y * blockDim.y) + threadIdx.y;
 
-static __global__ void mandelbrot_frame(p010_frame_t* p010, float zoom, int max_iterations) {
-    uint16_t x = (blockIdx.x * blockDim.x) + threadIdx.x;
-    uint16_t y = (blockIdx.y * blockDim.y) + threadIdx.y;
+    // Center + 4 corners + 4 edge midpoints, in units of `offset`
+    const double aa_offsets[9][2] = {
+        { 0.0,  0.0},
+        {-1.0,  1.0}, { 1.0,  1.0}, {-1.0, -1.0}, { 1.0, -1.0},
+        { 0.0,  1.0}, { 0.0, -1.0}, {-1.0,  0.0}, { 1.0,  0.0},
+    };
 
-    // Out of bounds protection. If a sync is needed, call here too
-    if (x >= WIDTH || y >= HEIGHT) return;
+    const double offset = (1.0 / zoom) / 3.0;
+    const double base_cx = CENTER_X + (static_cast<double>(x) + 0.5 - WIDTH / 2.0) / zoom;
+    const double base_cy = CENTER_Y - (static_cast<double>(y) + 0.5 - HEIGHT / 2.0) / zoom;
 
-    float pixel_w = 1.0f / zoom;
-    float offset = pixel_w / 3.0f;
-    
-    float base_cx = CENTER_X + (x + 0.5f - WIDTH / 2.0f) / zoom;
-    float base_cy = CENTER_Y - (y + 0.5f - HEIGHT / 2.0f) / zoom;
-
-    float sum_r = 0.0f, sum_g = 0.0f, sum_b = 0.0f;
-    float min_r = 1e30f, max_r = -1e30f;
-
-    // Center + 4 corners (track R range for chaos check)
-    float nu = get_smoothed_iter(base_cx, base_cy, max_iterations); // Center
-    accumulate_sample(nu, sum_r, sum_g, sum_b, &min_r, &max_r);
-
-    nu = get_smoothed_iter(base_cx - offset, base_cy + offset, max_iterations); // Top left
-    accumulate_sample(nu, sum_r, sum_g, sum_b, &min_r, &max_r);
-
-    nu = get_smoothed_iter(base_cx + offset, base_cy + offset, max_iterations); // Top right
-    accumulate_sample(nu, sum_r, sum_g, sum_b, &min_r, &max_r);
-
-    nu = get_smoothed_iter(base_cx - offset, base_cy - offset, max_iterations); // Bottom left
-    accumulate_sample(nu, sum_r, sum_g, sum_b, &min_r, &max_r);
-
-    nu = get_smoothed_iter(base_cx + offset, base_cy - offset, max_iterations); // Bottom right
-    accumulate_sample(nu, sum_r, sum_g, sum_b, &min_r, &max_r);
-
-    float samples = 5.0f;
-
-    // The threshold should be as high as we can make it without inducing visual artifacts
-    if ((max_r - min_r) > 0.025f) {
-        nu = get_smoothed_iter(base_cx, base_cy + offset, max_iterations); // Top midpoint
-        accumulate_sample(nu, sum_r, sum_g, sum_b, nullptr, nullptr);
-
-        nu = get_smoothed_iter(base_cx, base_cy - offset, max_iterations); // Bottom midpoint
-        accumulate_sample(nu, sum_r, sum_g, sum_b, nullptr, nullptr);
-
-        nu = get_smoothed_iter(base_cx - offset, base_cy, max_iterations); // Left midpoint
-        accumulate_sample(nu, sum_r, sum_g, sum_b, nullptr, nullptr);
-
-        nu = get_smoothed_iter(base_cx + offset, base_cy, max_iterations); // Right midpoint
-        accumulate_sample(nu, sum_r, sum_g, sum_b, nullptr, nullptr);
-
-        samples = 9.0f;
+    float3 sum_rgb = make_float3(0.0f, 0.0f, 0.0f);
+    for (int s = 0; s < 9; s++) {
+        const double cx = base_cx + aa_offsets[s][0] * offset;
+        const double cy = base_cy + aa_offsets[s][1] * offset;
+        sum_rgb += apply_palette(get_smoothed_iter(cx, cy, max_iterations));
     }
 
-    // Normalize the accumulators
-    float r = fmaxf(0.0f, fminf(1.0f, sum_r / samples));
-    float g = fmaxf(0.0f, fminf(1.0f, sum_g / samples));
-    float b = fmaxf(0.0f, fminf(1.0f, sum_b / samples));    
+    const float r = fmaxf(0.0f, fminf(1.0f, sum_rgb.x / 9.0f));
+    const float g = fmaxf(0.0f, fminf(1.0f, sum_rgb.y / 9.0f));
+    const float b = fmaxf(0.0f, fminf(1.0f, sum_rgb.z / 9.0f));
 
-    // Apply PQ curve independently to R, G, and B
-    float r_pq = apply_pq(r);
-    float g_pq = apply_pq(g);
-    float b_pq = apply_pq(b);
+    // Apply PQ curve independently to R, G, and B (HDR10 NCL)
+    const float r_pq = apply_pq(r);
+    const float g_pq = apply_pq(g);
+    const float b_pq = apply_pq(b);
 
-    // Apply Rec. 2020 Matrix (Linear combination of the PQ values)
-    float Y =  0.2627f * r_pq + 0.6780f * g_pq + 0.0593f * b_pq;
-    float U = -0.1396f * r_pq - 0.3604f * g_pq + 0.5000f * b_pq;
-    float V =  0.5000f * r_pq - 0.4598f * g_pq - 0.0402f * b_pq;
+    // Apply Rec. 2020 Matrix (linear combination of the PQ values)
+    const float Y =  0.2627f * r_pq + 0.6780f * g_pq + 0.0593f * b_pq;
+    const float U = -0.1396f * r_pq - 0.3604f * g_pq + 0.5000f * b_pq;
+    const float V =  0.5000f * r_pq - 0.4598f * g_pq - 0.0402f * b_pq;
 
     // Scale to clamped 10 bit range
-    float y_scaled = fmaxf(64.0f, fminf(940.0f, 64.0f + Y * 876.0f));
+    const float y_scaled = fmaxf(64.0f, fminf(940.0f, 64.0f + Y * 876.0f));
     float u_scaled = fmaxf(64.0f,  fminf(960.0f, 512.0f + U * 896.0f));
     float v_scaled = fmaxf(64.0f,  fminf(960.0f, 512.0f + V * 896.0f));
 
-    // Round to uint16 and make it left aligned (per P010 spec)
-    uint16_t y_out = __float2uint_rn(y_scaled) << 6;
-    uint16_t u_out = __float2uint_rn(u_scaled) << 6;
-    uint16_t v_out = __float2uint_rn(v_scaled) << 6;
+    // 2x2 box-average chroma within the warp (16-wide rows → vertical neighbor is lane±16)
+    u_scaled += __shfl_xor_sync(0xffffffff, u_scaled, 1);
+    u_scaled += __shfl_xor_sync(0xffffffff, u_scaled, BLOCK_DIM);
+    u_scaled *= 0.25f;
 
-    // Write values (y[HEIGHT][WIDTH], uv[CHROMA_HEIGHT][WIDTH] with UVUV interleave)
+    v_scaled += __shfl_xor_sync(0xffffffff, v_scaled, 1);
+    v_scaled += __shfl_xor_sync(0xffffffff, v_scaled, BLOCK_DIM);
+    v_scaled *= 0.25f;
+
+    // Round to uint16 and make it left aligned (per P010 spec)
+    const uint16_t y_out = __float2uint_rn(y_scaled) << 6;
+    const uint16_t u_out = __float2uint_rn(u_scaled) << 6;
+    const uint16_t v_out = __float2uint_rn(v_scaled) << 6;
+
     p010->y[y][x] = y_out;
 
-    // Chroma is 4:2:0 subsampled. Only top-left thread of a 2x2 block writes U and V
-    if ((x % 2 == 0) && (y % 2 == 0)) {
-        p010->uv[y / 2][x] = u_out; // Does the compiler combine these?
+    // Chroma is 4:2:0 subsampled. Top-left of each 2x2 writes the averaged U/V.
+    if ((threadIdx.x & 1) == 0 && (threadIdx.y & 1) == 0) {
+        p010->uv[y / 2][x] = u_out;
         p010->uv[y / 2][x + 1] = v_out;
     }
 }
 
-void generate_fused(p010_frame_t* d_p010, float zoom, int max_iterations) {
-    dim3 block_dim(16, 16);
-    dim3 grid_dim(
-        (WIDTH + block_dim.x - 1) / block_dim.x,
-        (HEIGHT + block_dim.y - 1) / block_dim.y
-    );
+void generate_fused(p010_frame_t* d_p010, double zoom, int max_iterations) {
+    dim3 block_dim(BLOCK_DIM, BLOCK_DIM);
+    dim3 grid_dim(WIDTH / BLOCK_DIM, HEIGHT / BLOCK_DIM);
 
     mandelbrot_frame<<<grid_dim, block_dim>>>(d_p010, zoom, max_iterations);
     CUDA_CHECK(cudaGetLastError());
-}
-
-void render_fused_frame_host(p010_frame_t* h_p010, float zoom, int max_iterations) {
-    p010_frame_t* d_p010 = nullptr;
-
-    CUDA_CHECK(cudaMalloc((void **)&d_p010, sizeof(p010_frame_t)));
-
-    generate_fused(d_p010, zoom, max_iterations);
-
-    CUDA_CHECK(cudaMemcpy(
-        h_p010,
-        d_p010,
-        sizeof(p010_frame_t),
-        cudaMemcpyDeviceToHost
-    ));
-
-    CUDA_CHECK(cudaFree(d_p010));
 }
