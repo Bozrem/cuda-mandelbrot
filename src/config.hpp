@@ -10,7 +10,7 @@ inline constexpr float CENTER_Y = -0.13741f;
 
 // Animation
 inline constexpr uint16_t FPS = 60;
-inline constexpr float DURATION_SEC = 1.0f;
+inline constexpr float DURATION_SEC = 10.0f;
 inline constexpr float MAGNIFICATION_PER_SEC = 2.0f; // zoom multiplier each second
 
 // Escape alg

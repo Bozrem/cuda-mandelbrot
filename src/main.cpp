@@ -1,67 +1,81 @@
 #include "frame_generation.h"
 #include "cuda_util.h"
+#include "NvencSink.hpp"
+
+#include <cuda.h>
 
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 
+#define CU_CHECK(call)                                                        \
+    do {                                                                      \
+        CUresult _res = (call);                                               \
+        if (_res != CUDA_SUCCESS) {                                           \
+            const char* _err_str = nullptr;                                   \
+            cuGetErrorString(_res, &_err_str);                                \
+            std::fprintf(stderr, "CUDA driver error (%s): %s\n", #call,       \
+                         _err_str ? _err_str : "unknown");                    \
+            std::exit(EXIT_FAILURE);                                          \
+        }                                                                     \
+    } while (0)
+
+
 int main() {
     constexpr float ZOOM_START = 500.0f;
-    constexpr uint32_t TOTAL_FRAMES = static_cast<uint32_t>(FPS * DURATION_SEC);
+    const uint32_t TOTAL_FRAMES = static_cast<uint32_t>(FPS * DURATION_SEC);
     // Per-frame zoom multiplier so MAGNIFICATION_PER_SEC holds over one second.
     const float zoom_per_frame = std::pow(MAGNIFICATION_PER_SEC, 1.0f / FPS);
 
-    // THIS DAMN THING WON'T WORK
-    // I've tried different codecs and a bunch of options. I can't get it to render in HDR
-    char ffmpeg_cmd[512];
-    std::snprintf(
-        ffmpeg_cmd, sizeof(ffmpeg_cmd),
-        "ffmpeg -y -f rawvideo -pix_fmt p010le -s %ux%u -r %u -i - "
-        "-c:v hevc_nvenc -profile:v main10 -pix_fmt p010le "
-        "-preset p5 -rc vbr -cq 19 -b:v 0 "
-        "-color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc "
-        "-color_range tv -tag:v hvc1 output_hdr.mp4",
-        static_cast<unsigned>(WIDTH), static_cast<unsigned>(HEIGHT),
-        static_cast<unsigned>(FPS));
-
-    FILE* ffmpeg_pipe = popen(ffmpeg_cmd, "w");
-    if (!ffmpeg_pipe) {
-        std::perror("popen ffmpeg");
-        return EXIT_FAILURE;
-    }
+    // NVENC needs a CUDA *driver* API context. Creating it explicitly (rather than
+    // letting the CUDA runtime lazily create its own primary context on first use)
+    // means the runtime calls below (cudaMalloc/cudaMemcpy2D) and NvEncoderCuda both
+    // operate on the same context.
+    CU_CHECK(cuInit(0));
+    CUdevice cu_device = 0;
+    CU_CHECK(cuDeviceGet(&cu_device, 0));
+    CUcontext cu_context = nullptr;
+    CU_CHECK(cuCtxCreate(&cu_context, 0, cu_device));
 
     p010_frame_t* d_p010 = nullptr;
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_p010), sizeof(p010_frame_t)));
 
-    static p010_frame_t h_p010;
-    float zoom = ZOOM_START;
+    try {
+        // Scoped so ~NvencSink() (flush + close) runs before we tear down the CUDA context below.
+        {
+            NvencSink sink(cu_context, "output_hdr.hevc");
 
-    for (uint32_t frame = 0; frame < TOTAL_FRAMES; frame++) {
-        // MVP iteration schedule — tune A/B as you go deeper.
-        int max_iterations = static_cast<int>(50.0f + 20.0f * std::log2(zoom));
+            float zoom = ZOOM_START;
+            for (uint32_t frame = 0; frame < TOTAL_FRAMES; frame++) {
+                // MVP iteration schedule — tune A/B as you go deeper.
+                int max_iterations = static_cast<int>(50.0f + 20.0f * std::log2(zoom));
 
-        generate_fused(d_p010, zoom, max_iterations);
-        CUDA_CHECK(cudaMemcpy(&h_p010, d_p010, sizeof(p010_frame_t),
-                              cudaMemcpyDeviceToHost));
+                // Linear pipeline for now: generate, then encode, one frame at a time.
+                // No overlap between GPU render and NVENC submission yet — slow but simple.
+                generate_fused(d_p010, zoom, max_iterations);
+                sink.queue_frame(d_p010); // frame stays device-resident the whole way through
 
-        if (std::fwrite(&h_p010, 1, sizeof(h_p010), ffmpeg_pipe) != sizeof(h_p010)) {
-            std::fprintf(stderr, "fwrite to ffmpeg failed at frame %u\n", frame);
-            pclose(ffmpeg_pipe);
-            CUDA_CHECK(cudaFree(d_p010));
-            return EXIT_FAILURE;
-        }
+                zoom *= zoom_per_frame;
 
-        zoom *= zoom_per_frame;
-    }
+                const uint32_t done = frame + 1;
+                std::fprintf(stderr, "\r[%3u%%] frame %u/%u  zoom=%.3g  iters=%d",
+                             (done * 100) / TOTAL_FRAMES, done, TOTAL_FRAMES,
+                             zoom / zoom_per_frame, max_iterations);
+                std::fflush(stderr);
+            }
+            std::fprintf(stderr, "\n");
+        } // ~NvencSink() flushes remaining frames and closes the bitstream file here
 
-    int ffmpeg_status = pclose(ffmpeg_pipe);
-    CUDA_CHECK(cudaFree(d_p010));
-
-    if (ffmpeg_status != 0) {
-        std::fprintf(stderr, "ffmpeg exited with status %d\n", ffmpeg_status);
+        std::printf("Wrote output_hdr.hevc (%u frames @ %u fps)\n", TOTAL_FRAMES, FPS);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "Encode failed: %s\n", e.what());
+        CUDA_CHECK(cudaFree(d_p010));
+        CU_CHECK(cuCtxDestroy(cu_context));
         return EXIT_FAILURE;
     }
 
-    std::printf("Wrote output_hdr.mp4 (%u frames @ %u fps)\n", TOTAL_FRAMES, FPS);
+    CUDA_CHECK(cudaFree(d_p010));
+    CU_CHECK(cuCtxDestroy(cu_context));
+
     return 0;
 }
